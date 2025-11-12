@@ -1,6 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
+const { loadExamples } = require('../../lib/sheets');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -175,6 +176,25 @@ async function processEmail(messageId, contentLabelId) {
 }
 
 async function handleNewContent(input, threadId) {
+  // Load training examples from Google Sheet
+  const examples = await loadExamples();
+  
+  // Build examples section for prompt
+  let examplesSection = '';
+  if (examples && examples.length > 0) {
+    examplesSection = '\n\nCRITICAL - TRAINING EXAMPLES FROM PAST CONTENT:\n\n';
+    examplesSection += 'Use these examples to determine the RIGHT amount of content to generate. Match the density pattern:\n\n';
+    examples.forEach((ex, i) => {
+      const blogCount = [ex.blog1, ex.blog2].filter(Boolean).length;
+      const linkedInCount = [ex.linkedin1, ex.linkedin2, ex.linkedin3].filter(Boolean).length;
+      examplesSection += `Example ${i + 1} (${ex.density} density, ${ex.date}):\n`;
+      examplesSection += `Input length: ~${ex.input.length} chars\n`;
+      examplesSection += `Input preview: "${ex.input.substring(0, 100)}..."\n`;
+      examplesSection += `Output: ${blogCount} blog(s), ${linkedInCount} LinkedIn post(s)\n\n`;
+    });
+    examplesSection += 'MATCH THIS PATTERN. Do not over-generate.\n';
+  }
+
   const systemPrompt = `You are an intelligent content assistant for Ben Corrado, founder of Corrado & Co., a Denver-based automation consulting company.
 
 CONTEXT:
@@ -189,38 +209,46 @@ BEN'S VOICE & EXPERTISE:
 - Writes in a professional but approachable tone - technical when needed, accessible when possible, honest and realistic
 - Uses real examples from client work
 - Focuses on practical, actionable insights
+- Often writes in first person with personal anecdotes
+- Uses specific examples from his own experience (preserve these!)
 
 YOUR TASK:
 1. ANALYZE the input to determine what content can legitimately be created from it
 2. DO NOT fabricate or stretch content too far beyond what the input supports
-3. Generate between 1-5 total pieces based on substance:
+3. PRESERVE Ben's original examples, phrases, and voice - don't over-polish
+4. Generate between 1-5 total pieces based on substance:
    - Minimum: 1 LinkedIn post (always possible)
    - Maximum: 2 blog posts + 3 LinkedIn posts
 
 CONTENT GUIDELINES:
-- Blog posts: 800-1200 words, deeper dives, technical depth, real examples
+- Blog posts: 800-1200 words, deeper dives, technical depth, real examples from Ben's work
 - LinkedIn posts: 75-200 words, conversational, single insight or story, actionable
+- KEEP Ben's original phrasing when possible - just structure it better
+- PRESERVE specific examples Ben mentions (like "I'm feeling overwhelmed" or client stories)
 
-ASSESSMENT CRITERIA:
-- Quick tip/hack = 1 LinkedIn post
-- Single story/insight = 1 LinkedIn post or 1 blog
+ASSESSMENT CRITERIA (Be conservative):
+- Quick tip/hack = 1 LinkedIn post ONLY
+- Single story/insight = 1 LinkedIn post OR 1 blog (not both unless substantial)
 - Detailed case study = 1 blog + 1-2 LinkedIn posts
-- Multiple insights = 2-3 LinkedIn posts (different angles)
-- Major project/learning = 1-2 blogs + 2-3 LinkedIn posts`;
+- Multiple distinct insights = 2-3 LinkedIn posts (different angles)
+- Major project/learning = 1-2 blogs + 2-3 LinkedIn posts${examplesSection}`;
 
   const userPrompt = `Input from Ben:
 "${input}"
 
 ANALYZE THIS INPUT:
-1. How much substance is here?
+1. How much substance is here? (Compare to the examples above)
 2. What content can legitimately be created without fabricating?
 3. What would provide the most value to Ben's audience?
+4. What specific examples or phrases from Ben should be preserved?
 
 Generate the appropriate number of pieces (1-5 total, with minimum 1 LinkedIn post).
 
+IMPORTANT: If the input is similar in length/substance to one of the "Light" examples above, generate ONLY 1 LinkedIn post.
+
 Return ONLY valid JSON in this format:
 {
-  "assessment": "Brief explanation of what you decided and why",
+  "assessment": "Brief explanation of what you decided and why (reference the examples)",
   "blog": [
     {
       "title": "...",
@@ -336,21 +364,32 @@ async function sendApprovalEmail(generated, blogData, linkedInData) {
   emailContent += 'To: ben@corradoco.com\n';
   emailContent += 'Subject: [Content Assistant] New content for approval\n\n';
   emailContent += `Assessment: ${generated.assessment}\n\n`;
+  emailContent += '═══════════════════════════════════════\n\n';
   
   if (blogData.length > 0) {
     emailContent += '📝 BLOG POSTS:\n\n';
     blogData.forEach((blog, i) => {
       emailContent += `[B${i + 1}] ${blog.title}\n`;
-      emailContent += `${blog.content.substring(0, 200)}...\n\n`;
+      emailContent += '─────────────────────────────────────\n';
+      emailContent += `${blog.content}\n`;
+      emailContent += '─────────────────────────────────────\n\n';
     });
   }
   
   emailContent += '💼 LINKEDIN POSTS:\n\n';
   linkedInData.forEach((post, i) => {
-    emailContent += `[L${i + 1}]\n${post.content}\n\n`;
+    emailContent += `[L${i + 1}]\n`;
+    emailContent += '─────────────────────────────────────\n';
+    emailContent += `${post.content}\n`;
+    emailContent += '─────────────────────────────────────\n\n';
   });
   
-  emailContent += 'Reply with "approved" to queue all content, or provide specific feedback.';
+  emailContent += '═══════════════════════════════════════\n\n';
+  emailContent += 'REPLY OPTIONS:\n';
+  emailContent += '• "approved" - Queue all content\n';
+  emailContent += '• "B1 next" - Swap blog with next in queue\n';
+  emailContent += '• "L1 - make it shorter" - Request specific changes\n';
+  emailContent += '• "skip B1" - Remove blog, keep LinkedIn\n\n';
 
   const encodedEmail = Buffer.from(emailContent)
     .toString('base64')
