@@ -1,14 +1,29 @@
 {
+  "name": "content-system",
+  "version": "1.0.0",
+  "description": "Content automation system for blog and LinkedIn",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "automation",
+    "content",
+    "linkedin",
+    "blog"
+  ],
+  "author": "Ben Corrado",
+  "license": "ISC",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0",
-    "@supabase/supabase-js": "^2.81.1",
-    "dotenv": "^17.2.3",
-    "googleapis": "^166.0.0",
-    "next": "^16.0.1",
-    "openai": "^6.8.1"
+    "@anthropic-ai/sdk": "^0.27.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.13.2",
+    "dotenv": "^16.3.1",
+    "googleapis": "^129.0.0",
+    "next": "^14.0.0"
   },
   "devDependencies": {
-    "@types/node": "^24.10.1",
-    "typescript": "^5.9.3"
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
   }
 }
