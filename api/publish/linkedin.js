@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
+const { sendEmail } = require('../../lib/email');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -30,6 +31,30 @@ module.exports = async (req, res) => {
         queued: false 
       });
     }
+    
+    // DRY RUN MODE - Safety check
+    const dryRun = process.env.ENABLE_PUBLISHING !== 'true';
+    
+    if (dryRun) {
+      console.log('🔒 DRY RUN MODE - Would publish LinkedIn:', content.content.substring(0, 50) + '...');
+      
+      // Send preview email
+      await sendEmail(
+        '[DRY RUN] Would publish LinkedIn',
+        `LinkedIn Post Preview:\n\n${content.content}\n\n---\nTo enable actual publishing, set ENABLE_PUBLISHING=true in Vercel environment variables.`
+      );
+      
+      return res.status(200).json({ 
+        dryRun: true,
+        message: 'Dry run - no actual publishing',
+        wouldPublish: {
+          preview: content.content.substring(0, 100) + '...',
+          fullLength: content.content.length
+        }
+      });
+    }
+    
+    // ACTUAL PUBLISHING (only runs if ENABLE_PUBLISHING=true)
     
     // Get LinkedIn user profile (to get URN)
     const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {

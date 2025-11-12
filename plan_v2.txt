@@ -1,6 +1,6 @@
 # Content Automation System - Implementation Plan V2
 **Last Updated:** November 12, 2025  
-**Status:** Foundation Complete, Testing Phase
+**Status:** Deployment Fixed, Testing Phase
 
 ---
 
@@ -14,6 +14,7 @@ An intelligent content assistant that manages blog and LinkedIn content producti
 - **Shared Supabase database** between content system and company website
 - Cron-based scheduling with **CRON_SECRET security**
 - Queue system based on **positions (1, 2, 3...)** not dates
+- **Pure Node.js serverless functions** (NOT Next.js)
 
 ---
 
@@ -27,6 +28,7 @@ An intelligent content assistant that manages blog and LinkedIn content producti
 - [x] Vercel project connected to GitHub
 - [x] Supabase database project created (shared with website)
 - [x] Node.js project with all dependencies installed
+- [x] **Vercel deployment fixed (removed Next.js, set framework to "Other")**
 
 #### Database
 - [x] All content system tables created in Supabase:
@@ -57,7 +59,7 @@ An intelligent content assistant that manages blog and LinkedIn content producti
 - [x] Email utility helper (`lib/email.js`)
 - [x] Google Sheets utility (`lib/sheets.js`)
 - [x] TypeScript types defined (`types/index.ts`)
-- [x] Updated `package.json` with all dependencies
+- [x] Updated `package.json` with all dependencies (Next.js removed)
 
 ### 🔨 BUILT BUT NOT TESTED
 
@@ -279,26 +281,26 @@ CREATE TABLE content_versions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Assistant's long-term memory (NOT IMPLEMENTED YET)
+-- Assistant's long-term memory
 CREATE TABLE assistant_memory (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    memory_type VARCHAR(50),
+    memory_type VARCHAR(50), -- 'weekly_vision', 'style_preference', etc.
     content JSONB,
     valid_from TIMESTAMPTZ DEFAULT NOW(),
     valid_until TIMESTAMPTZ
 );
 
--- Indexes
-CREATE INDEX ON content_library USING ivfflat (embedding vector_cosine_ops);
-CREATE INDEX idx_queue_position ON content_library(type, queue_position) 
-  WHERE queue_position IS NOT NULL;
-CREATE INDEX idx_content_type_status ON content_library(type, status);
-CREATE INDEX idx_email_thread ON conversation_threads(email_thread_id);
+-- Enable pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
 
--- Helper function: Shift queue positions after publish
+-- Create indexes
+CREATE INDEX ON content_library USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX idx_queue_position ON content_library(type, queue_position) WHERE queue_position IS NOT NULL;
+
+-- Helper function to shift queue positions after publishing
 CREATE OR REPLACE FUNCTION shift_queue_positions(
   content_type VARCHAR(20),
-  from_position INT
+  from_position INTEGER
 )
 RETURNS void
 LANGUAGE sql
@@ -309,7 +311,7 @@ AS $$
   AND queue_position > from_position;
 $$;
 
--- Helper function: Vector similarity search (NOT TESTED YET)
+-- Helper function for semantic search (when embeddings are implemented)
 CREATE OR REPLACE FUNCTION match_content(
   query_embedding vector(1536),
   match_threshold float,
@@ -337,7 +339,7 @@ AS $$
 $$;
 ```
 
-### Website Table (Existing - Shared)
+### Website Tables (Existing - Reference Only)
 
 ```sql
 -- Blog posts table (existing on website, used by content system for publishing)
@@ -352,127 +354,57 @@ CREATE TABLE blog_posts (
   published boolean DEFAULT false NOT NULL,
   published_at timestamptz
 );
-
--- Auto-update trigger (already exists on website)
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ language 'plpgsql';
-
-CREATE TRIGGER update_blog_posts_updated_at 
-BEFORE UPDATE ON blog_posts 
-FOR EACH ROW 
-EXECUTE FUNCTION update_updated_at_column();
 ```
 
 ---
 
-## Environment Variables (Final)
+## Configuration Files
 
-### Required Variables
+### package.json
 
-```env
-# Supabase (shared with website)
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_KEY=your-service-role-key
-
-# Anthropic AI
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Google Gmail API
-GMAIL_CLIENT_ID=xxxxx.apps.googleusercontent.com
-GMAIL_CLIENT_SECRET=xxxxx
-GMAIL_REFRESH_TOKEN=1//04xxxxx
-EMAIL_ADDRESS=ben@corradoco.com
-
-# Google Sheets API
-GOOGLE_SHEET_ID=your-sheet-id-from-url
-
-# Cron Security
-CRON_SECRET=your-randomly-generated-secret-64-chars
-
-# LinkedIn API (PENDING APPROVAL)
-LINKEDIN_CLIENT_ID=xxxxx
-LINKEDIN_CLIENT_SECRET=xxxxx
-LINKEDIN_ACCESS_TOKEN=xxxxx
-```
-
-### Variable Notes
-
-**CRON_SECRET:**
-- Generated via: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-- Used to secure all cron endpoints
-- Vercel automatically includes this in Authorization header when calling cron jobs
-- Each endpoint checks: `if (authHeader !== 'Bearer ${process.env.CRON_SECRET}') return 401`
-
-**GOOGLE_SHEET_ID:**
-- Found in Google Sheet URL: `docs.google.com/spreadsheets/d/{SHEET_ID}/edit`
-- Service account must have Editor access to this sheet
-
-**Service Account:**
-- JSON key file stored in `/private/google-service-account.json`
-- NOT in environment variables (loaded directly in code)
-- Added to `.gitignore` for security
-
----
-
-## File Structure
-
-```
-content-system/
-├── api/
-│   ├── content/
-│   │   └── generate.js          ✅ Content generation with intelligent analysis
-│   ├── email/
-│   │   └── poll.js              🔨 Gmail polling cron (every 5 min)
-│   ├── publish/
-│   │   ├── blog.js              🔨 Direct DB write to blog_posts
-│   │   └── linkedin.js          ⏳ LinkedIn API (pending approval)
-│   ├── assistant/
-│   │   └── lineup.js            🔨 Monday morning lineup email
-│   └── health.js                ✅ Simple health check endpoint
-│
-├── lib/
-│   ├── queue.js                 ✅ Queue management functions
-│   ├── email.js                 ✅ Gmail sending utilities
-│   ├── sheets.js                ✅ Google Sheets utilities
-│   ├── supabase.ts              ✅ Supabase client
-│   └── anthropic.ts             ✅ Anthropic client
-│
-├── types/
-│   └── index.ts                 ✅ TypeScript type definitions
-│
-├── private/
-│   └── google-service-account.json  ✅ Service account key (gitignored)
-│
-├── test-gmail.js                ✅ Gmail send/receive test
-├── test-sheets.js               ✅ Google Sheets write test
-├── test-supabase.js             ✅ Supabase CRUD test
-├── get-gmail-token.js           ✅ One-time token generator
-│
-├── .env.local                   ✅ Local environment variables
-├── .gitignore                   ✅ Ignores node_modules, .env, private/
-├── package.json                 ✅ All dependencies installed
-├── tsconfig.json                ✅ TypeScript configuration
-├── vercel.json                  ✅ Cron jobs configured
-├── plan.txt                     ✅ Original plan
-└── plan_v2.txt                  ✅ This document
-
-Legend:
-✅ = Complete and tested
-🔨 = Built but not tested
-⏳ = Not started
-```
-
----
-
-## Cron Jobs Schedule
+**CRITICAL:** Do NOT include Next.js in dependencies. This is a pure Node.js serverless functions project.
 
 ```json
 {
+  "name": "content-system",
+  "version": "1.0.0",
+  "description": "Content automation system for blog and LinkedIn",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "automation",
+    "content",
+    "linkedin",
+    "blog"
+  ],
+  "author": "Ben Corrado",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.3",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.13.2",
+    "dotenv": "^16.3.1",
+    "googleapis": "^129.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}
+```
+
+### vercel.json
+
+```json
+{
+  "functions": {
+    "api/**/*.js": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  },
   "crons": [
     {
       "path": "/api/email/poll",
@@ -502,212 +434,34 @@ Legend:
 }
 ```
 
-**Schedule Breakdown:**
-- **Every 5 minutes:** Check Gmail for new emails
-- **Monday 8am:** Send weekly lineup approval email
-- **Monday 10am:** Publish blog post
-- **Tuesday 9am:** Publish LinkedIn post
-- **Thursday 9am:** Publish LinkedIn post
-- **Saturday 9am:** Publish LinkedIn post
-
-**Security:** All cron endpoints verify `Authorization: Bearer ${CRON_SECRET}` header
-
 ---
 
-## Critical Implementation Details
+## Environment Variables
 
-### 1. Content Generation Intelligence
+```env
+# Supabase (shared with website)
+SUPABASE_URL=your-supabase-url
+SUPABASE_SERVICE_KEY=your-service-key
 
-The system MUST analyze input before generating. It does not blindly create 1 blog + 2 LinkedIn posts every time.
+# APIs
+ANTHROPIC_API_KEY=your-claude-key
+LINKEDIN_CLIENT_ID=your-linkedin-client-id
+LINKEDIN_CLIENT_SECRET=your-linkedin-client-secret
+LINKEDIN_ACCESS_TOKEN=your-linkedin-token
 
-**Bad Approach (Don't Do This):**
-```javascript
-// ❌ Always generates fixed amount regardless of input
-const generated = {
-  blog: { title: "...", content: "..." },
-  linkedin: [{ content: "..." }, { content: "..." }]
-};
+# Google
+GOOGLE_SERVICE_ACCOUNT=base64-encoded-json
+GOOGLE_SHEET_ID=your-sheet-id
+
+# Email
+GMAIL_CLIENT_ID=your-client-id
+GMAIL_CLIENT_SECRET=your-client-secret
+GMAIL_REFRESH_TOKEN=your-refresh-token
+EMAIL_ADDRESS=ben@corradoco.com
+
+# Security
+CRON_SECRET=random-secret-string
 ```
-
-**Correct Approach:**
-```javascript
-// ✅ Analyzes input first, then decides
-const prompt = `
-  Analyze input: "${input}"
-  
-  How much substance? What can be created without fabricating?
-  Generate 1-5 pieces based on actual content value.
-`;
-
-const generated = {
-  assessment: "This is a quick tip, so 1 LinkedIn post is appropriate",
-  blog: [],
-  linkedin: [{ content: "..." }]
-};
-```
-
-### 2. Email Filtering
-
-The Gmail polling endpoint filters on TWO criteria:
-
-```javascript
-// Both conditions must be true:
-1. Email from: ben@corradoco.com
-2. Subject contains: "CONTENT" (case insensitive)
-
-// Gmail API query:
-q: `from:ben@corradoco.com subject:CONTENT is:unread after:${tenMinutesAgo}`
-```
-
-If either is false, email is ignored.
-
-### 3. Blog Publishing Flow
-
-**IMPORTANT:** Do NOT create a separate blog API. Write directly to the shared database.
-
-```javascript
-// ❌ Wrong: Making HTTP request to separate API
-const response = await fetch('https://website.com/api/blog', {
-  method: 'POST',
-  body: JSON.stringify(blogData)
-});
-
-// ✅ Correct: Direct database write
-const { data: publishedPost } = await supabase
-  .from('blog_posts')
-  .insert({
-    title: content.title,
-    slug: generateSlug(content.title),
-    content: content.content,
-    excerpt: content.excerpt || content.content.substring(0, 200) + '...',
-    published: true,
-    published_at: new Date().toISOString()
-  })
-  .select()
-  .single();
-```
-
-### 4. Queue Position Management
-
-After publishing, ALWAYS shift positions:
-
-```javascript
-// After publishing content at position 1:
-
-// 1. Update content status
-await supabase
-  .from('content_library')
-  .update({
-    status: 'posted',
-    posted_date: new Date().toISOString(),
-    queue_position: null  // Remove from queue
-  })
-  .eq('id', content.id);
-
-// 2. Shift everyone else up
-await supabase.rpc('shift_queue_positions', {
-  content_type: 'blog',
-  from_position: 1
-});
-
-// Result: Position 2 becomes 1, Position 3 becomes 2, etc.
-```
-
-### 5. Service Account vs OAuth
-
-**Gmail API:** Uses OAuth2 with refresh token
-**Google Sheets API:** Uses service account with JSON key
-
-```javascript
-// Gmail (OAuth)
-const oauth2Client = new google.auth.OAuth2(...);
-oauth2Client.setCredentials({
-  refresh_token: process.env.GMAIL_REFRESH_TOKEN
-});
-
-// Sheets (Service Account)
-const serviceAccount = require('../private/google-service-account.json');
-const auth = new google.auth.GoogleAuth({
-  credentials: serviceAccount,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets']
-});
-```
-
----
-
-## Next Steps (Priority Order)
-
-### Phase 1: Core Functionality Testing (Next)
-
-1. **Test Content Generation**
-   - Send email to ben@corradoco.com with subject "CONTENT test"
-   - Wait 5 minutes for polling
-   - Verify approval email arrives
-   - Check content_library table for entries
-
-2. **Test Approval Flow**
-   - Reply to approval email with "approved"
-   - Verify content moves to 'approved' status
-   - Verify content added to queue
-
-3. **Test Queue Management**
-   - Manually add content to queue
-   - Verify positions are correct
-   - Test swapping, moving
-
-4. **Test Blog Publishing**
-   - Add approved blog to position 1
-   - Trigger `/api/publish/blog` manually
-   - Verify blog appears in blog_posts table
-   - Check website to confirm it shows
-
-### Phase 2: LinkedIn Integration (Blocked)
-
-**Waiting on:** LinkedIn "Share on LinkedIn" API approval
-
-Once approved:
-1. Get access token
-2. Test LinkedIn publishing endpoint
-3. Add content to queue and test automated posting
-
-### Phase 3: Enhanced Features
-
-1. **Revision Loop**
-   - Parse feedback from email replies
-   - Generate revised content
-   - Track version history
-
-2. **Queue Commands**
-   - "B1 next" - swap blog
-   - "L2 next" - swap LinkedIn
-   - "Show more" - display deep queue
-   - Parse and execute these commands
-
-3. **Monday Lineup**
-   - Test lineup email generation
-   - Show next 4 pieces
-   - Show what's coming after
-
-4. **Google Sheets Integration**
-   - Log content to Status sheet
-   - Update status in real-time
-   - Archive posted content
-
-### Phase 4: Advanced Intelligence
-
-1. **Semantic Search**
-   - Generate embeddings for all content
-   - Implement similarity search
-   - "Make it like the X post" command
-
-2. **Style Matching**
-   - Extract style markers from past content
-   - Apply to new content generation
-
-3. **Proactive Assistant**
-   - Analyze content gaps
-   - Suggest topics
-   - Strategic check-ins
 
 ---
 
@@ -811,6 +565,22 @@ SELECT * FROM blog_posts ORDER BY published_at DESC;
 ---
 
 ## Troubleshooting Guide
+
+### Vercel Deployment Fails
+
+**Symptoms:** "Couldn't find any `pages` or `app` directory" error
+
+**Root Cause:** Vercel detecting project as Next.js
+
+**Fix:**
+1. Remove Next.js from `package.json` dependencies
+2. Delete `package-lock.json`
+3. In Vercel dashboard: Settings → Build & Development Settings → Framework Preset → Change to "Other"
+4. Redeploy
+
+**Prevention:**
+- Never add Next.js, React, or React-DOM to dependencies
+- This is a pure Node.js serverless functions project
 
 ### Gmail Polling Not Working
 
@@ -929,11 +699,13 @@ SELECT * FROM blog_posts ORDER BY created_at DESC LIMIT 1;
 8. **LinkedIn is pending** - Can't test until API approved by LinkedIn
 9. **Shared Supabase database** - Content system and website use the same DB
 10. **Test locally before deploying** - Use the test scripts to verify everything works
+11. **NEVER add Next.js to package.json** - This is a pure Node.js serverless functions project
+12. **Vercel framework preset MUST be "Other"** - Not Next.js, not anything else
 
 This system is designed to be Ben's personal content assistant. Keep it focused, intelligent, and reliable. Quality over quantity. Substance over fabrication.
 
 ---
 
-**Document Version:** 2.0  
+**Document Version:** 2.1  
 **Last Updated:** November 12, 2025  
-**Status:** Ready for testing phase
+**Status:** Deployment fixed, ready for testing phase

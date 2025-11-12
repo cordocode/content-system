@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { sendEmail } = require('../../lib/email');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -36,6 +37,30 @@ module.exports = async (req, res) => {
         queued: false 
       });
     }
+    
+    // DRY RUN MODE - Safety check
+    const dryRun = process.env.ENABLE_PUBLISHING !== 'true';
+    
+    if (dryRun) {
+      console.log('🔒 DRY RUN MODE - Would publish blog:', content.title);
+      
+      // Send preview email
+      await sendEmail(
+        '[DRY RUN] Would publish blog',
+        `Title: ${content.title}\n\nSlug: ${generateSlug(content.title)}\n\nContent preview:\n${content.content.substring(0, 500)}...\n\n---\nTo enable actual publishing, set ENABLE_PUBLISHING=true in Vercel environment variables.`
+      );
+      
+      return res.status(200).json({ 
+        dryRun: true,
+        message: 'Dry run - no actual publishing',
+        wouldPublish: {
+          title: content.title,
+          slug: generateSlug(content.title)
+        }
+      });
+    }
+    
+    // ACTUAL PUBLISHING (only runs if ENABLE_PUBLISHING=true)
     
     // Generate slug from title
     const slug = generateSlug(content.title);
