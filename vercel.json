@@ -3,6 +3,10 @@
     "api/**/*.js": {
       "memory": 1024,
       "maxDuration": 30
+    },
+    "api/email/poll.js": {
+      "memory": 1024,
+      "maxDuration": 300
     }
   },
   "crons": [
