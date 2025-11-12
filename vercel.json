@@ -11,6 +11,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/sheets/sync-status",
+      "schedule": "*/30 * * * *"
+    },
+    {
       "path": "/api/publish/blog",
       "schedule": "0 10 * * 1"
     },

@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const Anthropic = require('@anthropic-ai/sdk');
+const { loadExamples } = require('../../lib/sheets');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -9,6 +10,48 @@ const supabase = createClient(
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
+
+// Hardcoded formatting templates
+const FORMATTING = {
+  LINKEDIN: {
+    description: 'LinkedIn posts should be 75-200 words, conversational tone, focused on a single insight or story',
+    example: `Just saved a client 15 hours/week by automating their invoice processing.
+
+The manual process: Download PDF → Read → Enter data → File away
+The automated version: Email arrives → n8n extracts data → Updates Airtable → Done
+
+Total build time: 3 hours
+Weekly time saved: 15 hours
+ROI timeline: Less than a month
+
+Small automations compound quickly.`
+  },
+  BLOG: {
+    description: 'Blog posts should be 800-1200 words in markdown format, technical but accessible, with real examples',
+    example: `# How We Built a Fleet Maintenance Document Retrieval System
+
+## The Problem
+
+My brother runs a fleet maintenance company...
+
+## The Solution
+
+We built a custom document retrieval system using:
+- n8n for workflow automation
+- Supabase for document storage
+- Claude for intelligent search
+
+## Implementation Details
+
+[Technical walkthrough with code examples]
+
+## Results
+
+- 400+ hours saved annually
+- 10-second document retrieval (vs 15 minutes)
+- Zero training required for staff`
+  }
+};
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -20,6 +63,21 @@ module.exports = async (req, res) => {
 
     if (!input) {
       return res.status(400).json({ error: 'Input text required' });
+    }
+
+    // Load training examples from Google Sheet
+    const examples = await loadExamples();
+    
+    // Build examples section for prompt
+    let examplesSection = '';
+    if (examples && examples.length > 0) {
+      examplesSection = '\n\nEXAMPLES FROM PAST CONTENT:\n\n';
+      examples.forEach((ex, i) => {
+        examplesSection += `Example ${i + 1} (${ex.density} density, dated ${ex.date}):\n`;
+        examplesSection += `Input: "${ex.input.substring(0, 150)}..."\n`;
+        examplesSection += `Output: ${ex.blog1 ? '1 blog' : '0 blogs'}`;
+        examplesSection += `, ${[ex.linkedin1, ex.linkedin2, ex.linkedin3].filter(Boolean).length} LinkedIn posts\n\n`;
+      });
     }
 
     const systemPrompt = `You are an intelligent content assistant for Ben Corrado, founder of Corrado & Co., a Denver-based automation consulting company.
@@ -45,15 +103,25 @@ YOUR TASK:
    - Maximum: 2 blog posts + 3 LinkedIn posts
 
 CONTENT GUIDELINES:
-- Blog posts: 800-1200 words, deeper dives, technical depth, real examples
-- LinkedIn posts: 75-200 words, conversational, single insight or story, actionable
+
+LinkedIn Format:
+${FORMATTING.LINKEDIN.description}
+
+Example LinkedIn post:
+${FORMATTING.LINKEDIN.example}
+
+Blog Format:
+${FORMATTING.BLOG.description}
+
+Example blog structure:
+${FORMATTING.BLOG.example}
 
 ASSESSMENT CRITERIA:
 - Quick tip/hack = 1 LinkedIn post
 - Single story/insight = 1 LinkedIn post or 1 blog
 - Detailed case study = 1 blog + 1-2 LinkedIn posts
 - Multiple insights = 2-3 LinkedIn posts (different angles)
-- Major project/learning = 1-2 blogs + 2-3 LinkedIn posts`;
+- Major project/learning = 1-2 blogs + 2-3 LinkedIn posts${examplesSection}`;
 
     const userPrompt = `Input from Ben:
 "${input}"
