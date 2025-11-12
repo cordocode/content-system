@@ -1,60 +1,72 @@
 const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-function generateSlug(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
 module.exports = async (req, res) => {
+  // Verify cron secret for security
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
-    // Get next blog post from queue (position 1)
+    // Get next LinkedIn post from queue (position 1)
     const { data: content, error: fetchError } = await supabase
       .from('content_library')
       .select('*')
-      .eq('type', 'blog')
+      .eq('type', 'linkedin')
       .eq('status', 'approved')
       .eq('queue_position', 1)
       .single();
     
     if (fetchError || !content) {
-      console.log('No blog post in queue for publishing');
+      console.log('No LinkedIn post in queue for publishing');
       return res.status(200).json({ 
-        message: 'No blog post in queue',
+        message: 'No LinkedIn post in queue',
         queued: false 
       });
     }
     
-    // Generate slug from title
-    const slug = generateSlug(content.title);
+    // Get LinkedIn user profile (to get URN)
+    const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
+      headers: {
+        'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
     
-    // Prepare excerpt (use existing or first 200 chars)
-    const excerpt = content.excerpt || content.content.substring(0, 200) + '...';
+    const authorUrn = `urn:li:person:${profileResponse.data.id}`;
     
-    // Write directly to blog_posts table (shared with website)
-    const { data: publishedPost, error: publishError } = await supabase
-      .from('blog_posts')
-      .insert({
-        title: content.title,
-        slug: slug,
-        content: content.content,
-        excerpt: excerpt,
-        published: true,
-        published_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-    
-    if (publishError) {
-      console.error('Blog publish error:', publishError);
-      throw publishError;
-    }
+    // Post to LinkedIn using UGC Posts API
+    const postResponse = await axios.post(
+      'https://api.linkedin.com/v2/ugcPosts',
+      {
+        author: authorUrn,
+        lifecycleState: 'PUBLISHED',
+        specificContent: {
+          'com.linkedin.ugc.ShareContent': {
+            shareCommentary: {
+              text: content.content
+            },
+            shareMediaCategory: 'NONE'
+          }
+        },
+        visibility: {
+          'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      }
+    );
     
     // Update content_library status
     await supabase
@@ -68,23 +80,28 @@ module.exports = async (req, res) => {
     
     // Shift remaining queue positions up
     await supabase.rpc('shift_queue_positions', {
-      content_type: 'blog',
+      content_type: 'linkedin',
       from_position: 1
     });
     
-    console.log(`✅ Published blog: "${content.title}" to website`);
+    console.log(`✅ Published LinkedIn post`);
     
     return res.status(200).json({ 
       success: true,
-      message: `Published: ${content.title}`,
-      published: publishedPost 
+      message: 'LinkedIn post published',
+      postId: postResponse.data.id 
     });
     
   } catch (error) {
-    console.error('Blog publishing error:', error);
+    console.error('LinkedIn publishing error:', error);
+    
+    // Log more details for debugging
+    if (error.response) {
+      console.error('LinkedIn API error:', error.response.data);
+    }
     
     return res.status(500).json({ 
-      error: 'Failed to publish blog',
+      error: 'Failed to publish LinkedIn post',
       details: error.message 
     });
   }

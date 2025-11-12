@@ -1,8 +1,41 @@
 {
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
+    }
+  ],
   "functions": {
     "api/**/*.js": {
       "memory": 1024,
       "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/email/poll",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/publish/blog",
+      "schedule": "0 10 * * 1"
+    },
+    {
+      "path": "/api/publish/linkedin",
+      "schedule": "0 9 * * 2"
+    },
+    {
+      "path": "/api/publish/linkedin",
+      "schedule": "0 9 * * 4"
+    },
+    {
+      "path": "/api/publish/linkedin",
+      "schedule": "0 9 * * 6"
+    },
+    {
+      "path": "/api/assistant/lineup",
+      "schedule": "0 8 * * 1"
+    }
+  ]
 }

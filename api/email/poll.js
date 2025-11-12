@@ -25,18 +25,56 @@ oauth2Client.setCredentials({
 const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  // Verify cron secret for security
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
   try {
-    const { messageId } = req.body;
+    // Get unread emails from last 10 minutes (to account for any delays)
+    const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
+    
+    const response = await gmail.users.messages.list({
+      userId: 'me',
+      q: `from:ben@corradoco.com subject:CONTENT is:unread after:${tenMinutesAgo}`,
+      maxResults: 10
+    });
 
-    if (!messageId) {
-      return res.status(400).json({ error: 'Message ID required' });
+    const messages = response.data.messages || [];
+    
+    if (messages.length === 0) {
+      console.log('No new CONTENT emails found');
+      return res.status(200).json({ 
+        message: 'No new emails',
+        checked: true 
+      });
     }
 
-    // Get the email message
+    console.log(`Found ${messages.length} new CONTENT email(s)`);
+    
+    // Process each message
+    for (const message of messages) {
+      await processEmail(message.id);
+    }
+
+    return res.status(200).json({ 
+      success: true,
+      processed: messages.length 
+    });
+
+  } catch (error) {
+    console.error('Gmail polling error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to poll Gmail',
+      details: error.message 
+    });
+  }
+};
+
+async function processEmail(messageId) {
+  try {
+    // Get the full email message
     const message = await gmail.users.messages.get({
       userId: 'me',
       id: messageId,
@@ -46,21 +84,11 @@ module.exports = async (req, res) => {
     const headers = message.data.payload.headers;
     const threadId = message.data.threadId;
     const subject = headers.find(h => h.name === 'Subject')?.value || '';
-    const from = headers.find(h => h.name === 'From')?.value || '';
 
-    // FILTER: Only process emails from ben@corradoco.com with subject containing "CONTENT" or "content"
-    if (!from.includes('ben@corradoco.com')) {
-      console.log(`Ignoring email from: ${from}`);
-      return res.status(200).json({ 
-        message: 'Email ignored - not from ben@corradoco.com' 
-      });
-    }
-
+    // Double-check it has CONTENT in subject (gmail query should handle this but just in case)
     if (!subject.toLowerCase().includes('content')) {
-      console.log(`Ignoring email with subject: ${subject}`);
-      return res.status(200).json({ 
-        message: 'Email ignored - subject does not contain CONTENT' 
-      });
+      console.log(`Skipping email without CONTENT in subject: ${subject}`);
+      return;
     }
 
     // Get email body
@@ -82,23 +110,30 @@ module.exports = async (req, res) => {
       .single();
 
     if (existingThread) {
-      // This is a reply to existing content - handle approval/revision
-      return await handleApproval(existingThread, body, res);
+      // Handle approval/revision
+      await handleApproval(existingThread, body);
     } else {
       // New content request
-      return await handleNewContent(body, threadId, res);
+      await handleNewContent(body, threadId);
     }
 
-  } catch (error) {
-    console.error('Email processing error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to process email',
-      details: error.message 
+    // Mark as read
+    await gmail.users.messages.modify({
+      userId: 'me',
+      id: messageId,
+      requestBody: {
+        removeLabelIds: ['UNREAD']
+      }
     });
-  }
-};
 
-async function handleNewContent(input, threadId, res) {
+    console.log(`✅ Processed email: ${messageId}`);
+
+  } catch (error) {
+    console.error(`Error processing email ${messageId}:`, error);
+  }
+}
+
+async function handleNewContent(input, threadId) {
   const systemPrompt = `You are an intelligent content assistant for Ben Corrado, founder of Corrado & Co., a Denver-based automation consulting company.
 
 CONTEXT:
@@ -213,15 +248,9 @@ Note: blog array can be empty, have 1 item, or 2 items. LinkedIn array must have
 
   // Send approval email
   await sendApprovalEmail(generated, blogData, linkedInData);
-
-  return res.status(200).json({
-    success: true,
-    message: `Generated ${blogData.length} blog(s) and ${linkedInData.length} LinkedIn post(s)`,
-    assessment: generated.assessment
-  });
 }
 
-async function handleApproval(thread, emailBody, res) {
+async function handleApproval(thread, emailBody) {
   // Parse approval response using Claude
   const prompt = `Analyze this email response to a content approval request.
 
@@ -259,11 +288,6 @@ Determine the user's intent and return JSON:
     const queue = require('../../lib/queue');
     await queue.addToQueue(thread.content_id, content.type);
   }
-
-  return res.status(200).json({
-    success: true,
-    action: parsed.action
-  });
 }
 
 async function sendApprovalEmail(generated, blogData, linkedInData) {

@@ -13,6 +13,12 @@ function generateSlug(title) {
 }
 
 module.exports = async (req, res) => {
+  // Verify cron secret for security
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     // Get next blog post from queue (position 1)
     const { data: content, error: fetchError } = await supabase

@@ -1,21 +1,34 @@
 const { createClient } = require('@supabase/supabase-js');
+const { google } = require('googleapis');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-function generateSlug(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
+// Set up Gmail auth
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GMAIL_CLIENT_ID,
+  process.env.GMAIL_CLIENT_SECRET,
+  'http://localhost:3000/oauth2callback'
+);
+
+oauth2Client.setCredentials({
+  refresh_token: process.env.GMAIL_REFRESH_TOKEN
+});
+
+const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
 module.exports = async (req, res) => {
+  // Verify cron secret for security
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
-    // Get next blog post from queue (position 1)
-    const { data: content, error: fetchError } = await supabase
+    // Get next blog from queue (position 1)
+    const { data: nextBlog } = await supabase
       .from('content_library')
       .select('*')
       .eq('type', 'blog')
@@ -23,68 +36,112 @@ module.exports = async (req, res) => {
       .eq('queue_position', 1)
       .single();
     
-    if (fetchError || !content) {
-      console.log('No blog post in queue for publishing');
-      return res.status(200).json({ 
-        message: 'No blog post in queue',
-        queued: false 
-      });
-    }
-    
-    // Generate slug from title
-    const slug = generateSlug(content.title);
-    
-    // Prepare excerpt (use existing or first 200 chars)
-    const excerpt = content.excerpt || content.content.substring(0, 200) + '...';
-    
-    // Write directly to blog_posts table (shared with website)
-    const { data: publishedPost, error: publishError } = await supabase
-      .from('blog_posts')
-      .insert({
-        title: content.title,
-        slug: slug,
-        content: content.content,
-        excerpt: excerpt,
-        published: true,
-        published_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-    
-    if (publishError) {
-      console.error('Blog publish error:', publishError);
-      throw publishError;
-    }
-    
-    // Update content_library status
-    await supabase
+    // Get next 3 LinkedIn posts from queue (positions 1, 2, 3)
+    const { data: nextLinkedIn } = await supabase
       .from('content_library')
-      .update({
-        status: 'posted',
-        posted_date: new Date().toISOString(),
-        queue_position: null
-      })
-      .eq('id', content.id);
+      .select('*')
+      .eq('type', 'linkedin')
+      .eq('status', 'approved')
+      .in('queue_position', [1, 2, 3])
+      .order('queue_position', { ascending: true });
     
-    // Shift remaining queue positions up
-    await supabase.rpc('shift_queue_positions', {
-      content_type: 'blog',
-      from_position: 1
+    // Get next items in queue for context
+    const { data: blogQueue } = await supabase
+      .from('content_library')
+      .select('*')
+      .eq('type', 'blog')
+      .eq('status', 'approved')
+      .not('queue_position', 'is', null)
+      .order('queue_position', { ascending: true })
+      .limit(5);
+    
+    const { data: linkedInQueue } = await supabase
+      .from('content_library')
+      .select('*')
+      .eq('type', 'linkedin')
+      .eq('status', 'approved')
+      .not('queue_position', 'is', null)
+      .order('queue_position', { ascending: true })
+      .limit(6);
+    
+    // Build lineup email
+    let emailContent = 'From: ben@corradoco.com\n';
+    emailContent += 'To: ben@corradoco.com\n';
+    emailContent += 'Subject: [Content Assistant] Weekly Content Lineup\n\n';
+    emailContent += '📅 WEEKLY CONTENT LINEUP\n\n';
+    
+    // Blog (Monday)
+    emailContent += '📝 BLOG (Monday): [B1]\n';
+    if (nextBlog) {
+      emailContent += `Title: ${nextBlog.title}\n`;
+      emailContent += `${nextBlog.content.substring(0, 200)}...\n`;
+      emailContent += `→ Next: ${blogQueue[1]?.title || 'None'}\n\n`;
+    } else {
+      emailContent += '⚠️ No blog in queue\n\n';
+    }
+    
+    // LinkedIn (Tuesday)
+    emailContent += '💼 LINKEDIN (Tuesday): [L1]\n';
+    if (nextLinkedIn && nextLinkedIn[0]) {
+      emailContent += `${nextLinkedIn[0].content}\n`;
+      emailContent += `→ Next: ${linkedInQueue[1]?.title || 'None'}\n\n`;
+    } else {
+      emailContent += '⚠️ No LinkedIn post in queue\n\n';
+    }
+    
+    // LinkedIn (Thursday)
+    emailContent += '💼 LINKEDIN (Thursday): [L2]\n';
+    if (nextLinkedIn && nextLinkedIn[1]) {
+      emailContent += `${nextLinkedIn[1].content}\n`;
+      emailContent += `→ Next: ${linkedInQueue[2]?.title || 'None'}\n\n`;
+    } else {
+      emailContent += '⚠️ No LinkedIn post in queue\n\n';
+    }
+    
+    // LinkedIn (Saturday)
+    emailContent += '💼 LINKEDIN (Saturday): [L3]\n';
+    if (nextLinkedIn && nextLinkedIn[2]) {
+      emailContent += `${nextLinkedIn[2].content}\n`;
+      emailContent += `→ Next: ${linkedInQueue[3]?.title || 'None'}\n\n`;
+    } else {
+      emailContent += '⚠️ No LinkedIn post in queue\n\n';
+    }
+    
+    emailContent += '---\n';
+    emailContent += 'REPLY OPTIONS:\n';
+    emailContent += '• "All approved" - Lock in all 4 pieces\n';
+    emailContent += '• "B1 next" - Skip to next blog\n';
+    emailContent += '• "L2 - [feedback]" - Request changes\n';
+    emailContent += '• "Show more blogs" - See deeper queue\n';
+    
+    const encodedEmail = Buffer.from(emailContent)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw: encodedEmail
+      }
     });
     
-    console.log(`✅ Published blog: "${content.title}" to website`);
+    console.log('✅ Monday lineup email sent');
     
     return res.status(200).json({ 
       success: true,
-      message: `Published: ${content.title}`,
-      published: publishedPost 
+      message: 'Weekly lineup sent',
+      lineup: {
+        blog: nextBlog?.title || 'None',
+        linkedin: nextLinkedIn?.length || 0
+      }
     });
     
   } catch (error) {
-    console.error('Blog publishing error:', error);
-    
+    console.error('Lineup generation error:', error);
     return res.status(500).json({ 
-      error: 'Failed to publish blog',
+      error: 'Failed to generate lineup',
       details: error.message 
     });
   }

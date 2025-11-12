@@ -15,12 +15,11 @@
   "author": "Ben Corrado",
   "license": "ISC",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.27.0",
+    "@anthropic-ai/sdk": "^0.34.0",
     "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.13.2",
     "dotenv": "^16.3.1",
-    "googleapis": "^129.0.0",
-    "next": "^14.0.0"
+    "googleapis": "^129.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
