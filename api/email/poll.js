@@ -24,6 +24,41 @@ oauth2Client.setCredentials({
 
 const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
+// Get or create the "Content" label
+async function getOrCreateContentLabel() {
+  try {
+    // Get all labels
+    const response = await gmail.users.labels.list({
+      userId: 'me'
+    });
+    
+    // Check if Content label already exists
+    const existingLabel = response.data.labels?.find(
+      label => label.name.toLowerCase() === 'content'
+    );
+    
+    if (existingLabel) {
+      return existingLabel.id;
+    }
+    
+    // Create the label if it doesn't exist
+    const createResponse = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: {
+        name: 'Content',
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show'
+      }
+    });
+    
+    console.log('✅ Created "Content" label');
+    return createResponse.data.id;
+  } catch (error) {
+    console.error('Error managing Content label:', error);
+    throw error;
+  }
+}
+
 module.exports = async (req, res) => {
   // Verify cron secret for security
   const authHeader = req.headers.authorization || req.headers.Authorization;
@@ -53,9 +88,12 @@ module.exports = async (req, res) => {
 
     console.log(`Found ${messages.length} new CONTENT email(s)`);
     
+    // Get or create the Content label once (before processing messages)
+    const contentLabelId = await getOrCreateContentLabel();
+    
     // Process each message
     for (const message of messages) {
-      await processEmail(message.id);
+      await processEmail(message.id, contentLabelId);
     }
 
     return res.status(200).json({ 
@@ -72,7 +110,7 @@ module.exports = async (req, res) => {
   }
 };
 
-async function processEmail(messageId) {
+async function processEmail(messageId, contentLabelId) {
   try {
     // Get the full email message
     const message = await gmail.users.messages.get({
@@ -117,19 +155,22 @@ async function processEmail(messageId) {
       await handleNewContent(body, threadId);
     }
 
-    // Mark as read
+    // ONLY mark as read and move to Content label after successful processing
     await gmail.users.messages.modify({
       userId: 'me',
       id: messageId,
       requestBody: {
-        removeLabelIds: ['UNREAD']
+        removeLabelIds: ['UNREAD'],
+        addLabelIds: [contentLabelId]
       }
     });
 
-    console.log(`✅ Processed email: ${messageId}`);
+    console.log(`✅ Processed email: ${messageId} (marked read, moved to Content label)`);
 
   } catch (error) {
     console.error(`Error processing email ${messageId}:`, error);
+    // Don't mark as read or move if processing failed
+    throw error;
   }
 }
 
