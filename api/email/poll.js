@@ -166,7 +166,7 @@ async function processEmail(messageId, contentLabelId) {
 }
 
 // ============================================================================
-// PROMPT 1: INITIAL CONTENT GENERATION
+// PROMPT 1: INITIAL CONTENT GENERATION - USING CLAUDE 4.5 SONNET
 // ============================================================================
 async function handleNewContent(input, threadId) {
   const systemPrompt = `You are a professional LinkedIn content generation assistant for Ben Corrado. You are a sought after social media EXPERT. Ben sends content ideas - you turn them into quality posts. Your job: determine how many pieces of content to generate, then create them with variation.
@@ -205,7 +205,7 @@ Return in this exact format:
 }`;
 
   const response = await anthropic.messages.create({
-    model: 'claude-4-5-sonnet-20250929',
+    model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
     max_tokens: 5000,
     system: systemPrompt,
     messages: [{ role: 'user', content: input }]
@@ -275,7 +275,7 @@ Return in this exact format:
 }
 
 // ============================================================================
-// PROMPT 2: REVISION
+// PROMPT 2: REVISION - USING CLAUDE 4.5 SONNET
 // ============================================================================
 async function handleApproval(thread, emailBody, threadId) {
   // Parse approval response
@@ -291,7 +291,7 @@ Determine the user's intent and return JSON:
 CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backticks.`;
 
   const parseResponse = await anthropic.messages.create({
-    model: 'claude-3-5-sonnet-20241022',
+    model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
     max_tokens: 500,
     system: systemPrompt,
     messages: [{ role: 'user', content: emailBody }]
@@ -352,7 +352,7 @@ FEEDBACK:
 ${parsed.feedback}`;
 
     const revisionResponse = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+      model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
       max_tokens: 3000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }]
