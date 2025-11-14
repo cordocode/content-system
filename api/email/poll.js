@@ -1,7 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
-const { loadExamples } = require('../../lib/sheets');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -28,12 +27,10 @@ const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 // Get or create the "Content" label
 async function getOrCreateContentLabel() {
   try {
-    // Get all labels
     const response = await gmail.users.labels.list({
       userId: 'me'
     });
     
-    // Check if Content label already exists
     const existingLabel = response.data.labels?.find(
       label => label.name.toLowerCase() === 'content'
     );
@@ -42,7 +39,6 @@ async function getOrCreateContentLabel() {
       return existingLabel.id;
     }
     
-    // Create the label if it doesn't exist
     const createResponse = await gmail.users.labels.create({
       userId: 'me',
       requestBody: {
@@ -68,7 +64,6 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // Get unread emails from last 10 minutes (to account for any delays)
     const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
     
     const response = await gmail.users.messages.list({
@@ -89,10 +84,8 @@ module.exports = async (req, res) => {
 
     console.log(`Found ${messages.length} new CONTENT email(s)`);
     
-    // Get or create the Content label once (before processing messages)
     const contentLabelId = await getOrCreateContentLabel();
     
-    // Process each message
     for (const message of messages) {
       await processEmail(message.id, contentLabelId);
     }
@@ -113,7 +106,6 @@ module.exports = async (req, res) => {
 
 async function processEmail(messageId, contentLabelId) {
   try {
-    // Get the full email message
     const message = await gmail.users.messages.get({
       userId: 'me',
       id: messageId,
@@ -124,7 +116,6 @@ async function processEmail(messageId, contentLabelId) {
     const threadId = message.data.threadId;
     const subject = headers.find(h => h.name === 'Subject')?.value || '';
 
-    // Double-check it has CONTENT in subject (gmail query should handle this but just in case)
     if (!subject.toLowerCase().includes('content')) {
       console.log(`Skipping email without CONTENT in subject: ${subject}`);
       return;
@@ -150,13 +141,13 @@ async function processEmail(messageId, contentLabelId) {
 
     if (existingThread) {
       // Handle approval/revision
-      await handleApproval(existingThread, body);
+      await handleApproval(existingThread, body, threadId);
     } else {
       // New content request
       await handleNewContent(body, threadId);
     }
 
-    // ONLY mark as read and move to Content label after successful processing
+    // Mark as read and move to Content label after successful processing
     await gmail.users.messages.modify({
       userId: 'me',
       id: messageId,
@@ -166,89 +157,38 @@ async function processEmail(messageId, contentLabelId) {
       }
     });
 
-    console.log(`✅ Processed email: ${messageId} (marked read, moved to Content label)`);
+    console.log(`✅ Processed email: ${messageId}`);
 
   } catch (error) {
     console.error(`Error processing email ${messageId}:`, error);
-    // Don't mark as read or move if processing failed
     throw error;
   }
 }
 
+// ============================================================================
+// PROMPT 1: INITIAL CONTENT GENERATION
+// ============================================================================
 async function handleNewContent(input, threadId) {
-  // Load training examples from Google Sheet
-  const examples = await loadExamples();
-  
-  // Build examples section for prompt
-  let examplesSection = '';
-  if (examples && examples.length > 0) {
-    examplesSection = '\n\nCRITICAL - TRAINING EXAMPLES FROM PAST CONTENT:\n\n';
-    examplesSection += 'Use these examples to determine the RIGHT amount of content to generate. Match the density pattern:\n\n';
-    examples.forEach((ex, i) => {
-      const blogCount = [ex.blog1, ex.blog2].filter(Boolean).length;
-      const linkedInCount = [ex.linkedin1, ex.linkedin2, ex.linkedin3].filter(Boolean).length;
-      examplesSection += `Example ${i + 1} (${ex.density} density, ${ex.date}):\n`;
-      examplesSection += `Input length: ~${ex.input.length} chars\n`;
-      examplesSection += `Input preview: "${ex.input.substring(0, 100)}..."\n`;
-      examplesSection += `Output: ${blogCount} blog(s), ${linkedInCount} LinkedIn post(s)\n\n`;
-    });
-    examplesSection += 'MATCH THIS PATTERN. Do not over-generate.\n';
-  }
+  const systemPrompt = `You are a professional LinkedIn content generation assistant for Ben Corrado. You are a sought after social media EXPERT. Ben sends content ideas - you turn them into quality posts. Your job: determine how many pieces of content to generate, then create them with variation.
 
-  const systemPrompt = `You are an intelligent content assistant for Ben Corrado, founder of Corrado & Co., a Denver-based automation consulting company.
+Ben is someone who highly values honestly and setting realistic expectations. Although he sells AI and automation for mid sized companies - he is realistic about where the technology is at right now and some of the automation shortcomings. He doesn't think his ideas are revolutionary but does like sharing tips and tricks he uses. 
 
-CONTEXT:
-- Ben sends you brain dumps, stories, insights, or quick ideas via email
-- Your job is to transform these into polished blog posts and LinkedIn content
-- You're part of a content automation system that helps Ben maintain consistent output
-
-BEN'S VOICE & EXPERTISE:
-- Automation consultant specializing in n8n, Zapier, custom code workflows
-- Works with mid-sized companies (20-100 employees)
-- Values efficiency, excellence, systematic approaches
-- Writes in a professional but approachable tone - technical when needed, accessible when possible, honest and realistic
-- Uses real examples from client work
-- Focuses on practical, actionable insights
-- Often writes in first person with personal anecdotes
-- Uses specific examples from his own experience (preserve these!)
-
-YOUR TASK:
-1. ANALYZE the input to determine what content can legitimately be created from it
-2. DO NOT fabricate or stretch content too far beyond what the input supports
-3. PRESERVE Ben's original examples, phrases, and voice - don't over-polish
-4. Generate between 1-5 total pieces based on substance:
-   - Minimum: 1 LinkedIn post (always possible)
-   - Maximum: 2 blog posts + 3 LinkedIn posts
-
-CONTENT GUIDELINES:
-- Blog posts: 800-1200 words, deeper dives, technical depth, real examples from Ben's work
-- LinkedIn posts: 75-200 words, conversational, single insight or story, actionable
-- KEEP Ben's original phrasing when possible - just structure it better
-- PRESERVE specific examples Ben mentions (like "I'm feeling overwhelmed" or client stories)
-
-ASSESSMENT CRITERIA (Be conservative):
-- Quick tip/hack = 1 LinkedIn post ONLY
-- Single story/insight = 1 LinkedIn post OR 1 blog (not both unless substantial)
-- Detailed case study = 1 blog + 1-2 LinkedIn posts
-- Multiple distinct insights = 2-3 LinkedIn posts (different angles)
-- Major project/learning = 1-2 blogs + 2-3 LinkedIn posts${examplesSection}`;
-
-  const userPrompt = `Input from Ben:
-"${input}"
-
-ANALYZE THIS INPUT:
-1. How much substance is here? (Compare to the examples above)
-2. What content can legitimately be created without fabricating?
-3. What would provide the most value to Ben's audience?
-4. What specific examples or phrases from Ben should be preserved?
-
-Generate the appropriate number of pieces (1-5 total, with minimum 1 LinkedIn post).
-
-IMPORTANT: If the input is similar in length/substance to one of the "Light" examples above, generate ONLY 1 LinkedIn post.
+CONTENT RULES:
+- Blogs = big stories with titles
+- LinkedIn = smaller insights with BANGER hooks (make them NEED to read more)
+- Add value. Make it human. Line breaks for digestibility. Make it a clear flowing story.
+- Emojis sparingly (never at start), minimal em-dashes
+-Linkedin maximum 120 words
+DETERMINING HOW MUCH CONTENT:
+- Insight/hack = 1 LinkedIn post // 1 insight = 1 post
+- Detailed project summary = up to 2 blogs + 3 LinkedIn posts
+- Project story = 1 Blog + 2 Linkedin posts
+- Default = 1 LinkedIn post (most common)
+- Minimum: 1 LinkedIn | Maximum: 2 blogs + 3 LinkedIn
 
 Return ONLY valid JSON in this format:
 {
-  "assessment": "Brief explanation of what you decided and why (reference the examples)",
+  "assessment": "Brief explanation of what you decided",
   "blog": [
     {
       "title": "...",
@@ -259,15 +199,13 @@ Return ONLY valid JSON in this format:
   "linkedin": [
     { "content": "..." }
   ]
-}
-
-Note: blog array can be empty, have 1 item, or 2 items. LinkedIn array must have 1-3 items.`;
+}`;
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 5000,
     system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }]
+    messages: [{ role: 'user', content: input }]
   });
 
   const generated = JSON.parse(response.content[0].text);
@@ -316,29 +254,31 @@ Note: blog array can be empty, have 1 item, or 2 items. LinkedIn array must have
     });
 
   // Send approval email
-  await sendApprovalEmail(generated, blogData, linkedInData);
+  await sendApprovalEmail(generated, blogData, linkedInData, threadId);
 }
 
-async function handleApproval(thread, emailBody) {
-  // Parse approval response using Claude
-  const prompt = `Analyze this email response to a content approval request.
-
-Email body: "${emailBody}"
+// ============================================================================
+// PROMPT 2: REVISION
+// ============================================================================
+async function handleApproval(thread, emailBody, threadId) {
+  // Parse approval response
+  const systemPrompt = `Analyze email responses to content approval requests.
 
 Determine the user's intent and return JSON:
 {
   "action": "approve|revise|swap|skip",
-  "feedback": "specific changes requested if action is revise, otherwise null",
+  "feedback": "specific changes if revise, otherwise null",
   "contentReference": "B1, L1, L2, etc if mentioned, otherwise null"
 }`;
 
-  const response = await anthropic.messages.create({
+  const parseResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 500,
-    messages: [{ role: 'user', content: prompt }]
+    system: systemPrompt,
+    messages: [{ role: 'user', content: emailBody }]
   });
 
-  const parsed = JSON.parse(response.content[0].text);
+  const parsed = JSON.parse(parseResponse.content[0].text);
 
   // Handle based on action
   if (parsed.action === 'approve') {
@@ -347,7 +287,6 @@ Determine the user's intent and return JSON:
       .update({ status: 'approved' })
       .eq('id', thread.content_id);
     
-    // Add to queue
     const { data: content } = await supabase
       .from('content_library')
       .select('type')
@@ -356,10 +295,64 @@ Determine the user's intent and return JSON:
     
     const queue = require('../../lib/queue');
     await queue.addToQueue(thread.content_id, content.type);
+    
+    console.log('✅ Content approved and queued');
+    
+  } else if (parsed.action === 'revise') {
+    // Get original content
+    const { data: originalContent } = await supabase
+      .from('content_library')
+      .select('*')
+      .eq('id', thread.content_id)
+      .single();
+    
+    // Revision prompt
+    const systemPrompt = `You are revising content for Ben Corrado based on feedback.
+
+Ben is someone who highly values honestly and setting realistic expectations. Although he sells AI and automation for mid sized companies - he is realistic about where the technology is at right now and some of the automation shortcomings. He doesn't think his ideas are revolutionary but does like sharing tips and tricks he uses.
+
+STYLE GUIDELINES:
+- Blogs = big stories with titles
+- LinkedIn = smaller insights with BANGER hooks (make them NEED to read more)
+- Add value. Make it human. Line breaks for digestibility. Make it a clear flowing story.
+- Emojis sparingly (never at start), minimal em-dashes
+-Linkedin maximum 120 words
+
+Return ONLY the revised content - no JSON, no explanations.`;
+
+    const userPrompt = `ORIGINAL CONTENT:
+${originalContent.content}
+
+FEEDBACK:
+${parsed.feedback}`;
+
+    const revisionResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 3000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    });
+
+    const revisedContent = revisionResponse.content[0].text;
+
+    // Update content
+    await supabase
+      .from('content_library')
+      .update({
+        content: revisedContent,
+        version: originalContent.version + 1,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', thread.content_id);
+
+    // Send revised version for approval
+    await sendRevisionEmail(originalContent, revisedContent, threadId);
+    
+    console.log('✅ Content revised and sent for approval');
   }
 }
 
-async function sendApprovalEmail(generated, blogData, linkedInData) {
+async function sendApprovalEmail(generated, blogData, linkedInData, threadId) {
   let emailContent = 'From: ben@corradoco.com\n';
   emailContent += 'To: ben@corradoco.com\n';
   emailContent += 'Subject: [Content Assistant] New content for approval\n\n';
@@ -387,9 +380,7 @@ async function sendApprovalEmail(generated, blogData, linkedInData) {
   emailContent += '═══════════════════════════════════════\n\n';
   emailContent += 'REPLY OPTIONS:\n';
   emailContent += '• "approved" - Queue all content\n';
-  emailContent += '• "B1 next" - Swap blog with next in queue\n';
-  emailContent += '• "L1 - make it shorter" - Request specific changes\n';
-  emailContent += '• "skip B1" - Remove blog, keep LinkedIn\n\n';
+  emailContent += '• "B1 - make it shorter" - Request changes\n';
 
   const encodedEmail = Buffer.from(emailContent)
     .toString('base64')
@@ -400,7 +391,32 @@ async function sendApprovalEmail(generated, blogData, linkedInData) {
   await gmail.users.messages.send({
     userId: 'me',
     requestBody: {
-      raw: encodedEmail
+      raw: encodedEmail,
+      threadId: threadId
+    }
+  });
+}
+
+async function sendRevisionEmail(originalContent, revisedContent, threadId) {
+  let emailContent = 'From: ben@corradoco.com\n';
+  emailContent += 'To: ben@corradoco.com\n';
+  emailContent += 'Subject: Re: [Content Assistant] Revised content\n\n';
+  emailContent += '📝 REVISED VERSION:\n\n';
+  emailContent += revisedContent;
+  emailContent += '\n\n═══════════════════════════════════════\n';
+  emailContent += 'Reply "approved" to queue or provide more feedback.\n';
+
+  const encodedEmail = Buffer.from(emailContent)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: {
+      raw: encodedEmail,
+      threadId: threadId
     }
   });
 }
