@@ -56,15 +56,17 @@ module.exports = async (req, res) => {
     
     // ACTUAL PUBLISHING (only runs if ENABLE_PUBLISHING=true)
     
-    // Get LinkedIn user profile (to get URN)
-    const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
+    // Get LinkedIn user info (to get URN)
+    // IMPORTANT: Use /v2/userinfo (OpenID Connect) instead of /v2/me (legacy)
+    // This works with the 'openid' and 'profile' scopes
+    const userInfoResponse = await axios.get('https://api.linkedin.com/v2/userinfo', {
       headers: {
-        'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`
       }
     });
     
-    const authorUrn = `urn:li:person:${profileResponse.data.id}`;
+    // The 'sub' field contains the person ID
+    const authorUrn = `urn:li:person:${userInfoResponse.data.sub}`;
     
     // Post to LinkedIn using UGC Posts API
     const postResponse = await axios.post(
