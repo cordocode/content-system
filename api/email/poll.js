@@ -66,7 +66,7 @@ module.exports = async (req, res) => {
   try {
     const response = await gmail.users.messages.list({
       userId: 'me',
-      q: `from:ben@corradoco.com subject:CONTENT is:unread`,
+      q: `from:ben@corradoco.com subject:CONTENT -label:Content`,
       maxResults: 10
     });
 
@@ -80,17 +80,27 @@ module.exports = async (req, res) => {
       });
     }
 
-    console.log(`Found ${messages.length} new CONTENT email(s)`);
+    console.log(`Found ${messages.length} new CONTENT email(s) - Message IDs: ${messages.map(m => m.id).join(', ')}`);
     
     const contentLabelId = await getOrCreateContentLabel();
     
+    let processed = 0;
+    let skipped = 0;
+    
     for (const message of messages) {
-      await processEmail(message.id, contentLabelId);
+      const result = await processEmail(message.id, contentLabelId);
+      if (result === 'skipped') {
+        skipped++;
+      } else {
+        processed++;
+      }
     }
 
     return res.status(200).json({ 
       success: true,
-      processed: messages.length 
+      found: messages.length,
+      processed: processed,
+      skipped: skipped
     });
 
   } catch (error) {
@@ -138,41 +148,14 @@ async function processEmail(messageId, contentLabelId) {
       .single();
 
     if (existingThread) {
-      // Check if this specific message has already been processed
-      // by looking at the thread's updated_at timestamp
-      const messageDate = new Date(parseInt(message.data.internalDate));
-      const threadLastUpdate = new Date(existingThread.created_at);
-      
-      // If thread exists and message is older than thread update, skip (already processed)
-      if (messageDate <= threadLastUpdate) {
-        console.log(`⏭️ SKIPPING: Email already processed in thread ${threadId}`);
-        
-        // Still mark as read to clean up inbox
-        await gmail.users.messages.modify({
-          userId: 'me',
-          id: messageId,
-          requestBody: {
-            removeLabelIds: ['UNREAD'],
-            addLabelIds: [contentLabelId]
-          }
-        });
-        return;
-      }
-      
       // Handle approval/revision
       await handleApproval(existingThread, body, threadId);
-      
-      // Update thread timestamp so we know we processed this message
-      await supabase
-        .from('conversation_threads')
-        .update({ created_at: new Date().toISOString() })
-        .eq('id', existingThread.id);
     } else {
       // New content request
       await handleNewContent(body, threadId);
     }
 
-    // Mark as read and move to Content label after successful processing
+    // Add Content label after successful processing (prevents reprocessing)
     await gmail.users.messages.modify({
       userId: 'me',
       id: messageId,
