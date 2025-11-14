@@ -178,7 +178,8 @@ CONTENT RULES:
 - LinkedIn = smaller insights with BANGER hooks (make them NEED to read more)
 - Add value. Make it human. Line breaks for digestibility. Make it a clear flowing story.
 - Emojis sparingly (never at start), minimal em-dashes
--Linkedin maximum 120 words
+- LinkedIn maximum 120 words
+
 DETERMINING HOW MUCH CONTENT:
 - Insight/hack = 1 LinkedIn post // 1 insight = 1 post
 - Detailed project summary = up to 2 blogs + 3 LinkedIn posts
@@ -186,7 +187,9 @@ DETERMINING HOW MUCH CONTENT:
 - Default = 1 LinkedIn post (most common)
 - Minimum: 1 LinkedIn | Maximum: 2 blogs + 3 LinkedIn
 
-Return ONLY valid JSON in this format:
+CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backticks. Just the JSON object.
+
+Return in this exact format:
 {
   "assessment": "Brief explanation of what you decided",
   "blog": [
@@ -202,13 +205,27 @@ Return ONLY valid JSON in this format:
 }`;
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-4-5-sonnet-20250929',
     max_tokens: 5000,
     system: systemPrompt,
     messages: [{ role: 'user', content: input }]
   });
 
-  const generated = JSON.parse(response.content[0].text);
+  // Clean the response text to handle markdown code blocks if Claude adds them
+  let responseText = response.content[0].text;
+  
+  // Remove markdown code blocks if present
+  responseText = responseText.replace(/```json\s*/g, '');
+  responseText = responseText.replace(/```\s*/g, '');
+  responseText = responseText.trim();
+  
+  let generated;
+  try {
+    generated = JSON.parse(responseText);
+  } catch (parseError) {
+    console.error('Failed to parse Claude response:', responseText.substring(0, 500));
+    throw new Error('Failed to parse AI response as JSON');
+  }
 
   // Store content in database
   let blogData = [];
@@ -269,16 +286,24 @@ Determine the user's intent and return JSON:
   "action": "approve|revise|swap|skip",
   "feedback": "specific changes if revise, otherwise null",
   "contentReference": "B1, L1, L2, etc if mentioned, otherwise null"
-}`;
+}
+
+CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backticks.`;
 
   const parseResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-3-5-sonnet-20241022',
     max_tokens: 500,
     system: systemPrompt,
     messages: [{ role: 'user', content: emailBody }]
   });
 
-  const parsed = JSON.parse(parseResponse.content[0].text);
+  // Clean the response text
+  let responseText = parseResponse.content[0].text;
+  responseText = responseText.replace(/```json\s*/g, '');
+  responseText = responseText.replace(/```\s*/g, '');
+  responseText = responseText.trim();
+  
+  const parsed = JSON.parse(responseText);
 
   // Handle based on action
   if (parsed.action === 'approve') {
@@ -316,7 +341,7 @@ STYLE GUIDELINES:
 - LinkedIn = smaller insights with BANGER hooks (make them NEED to read more)
 - Add value. Make it human. Line breaks for digestibility. Make it a clear flowing story.
 - Emojis sparingly (never at start), minimal em-dashes
--Linkedin maximum 120 words
+- LinkedIn maximum 120 words
 
 Return ONLY the revised content - no JSON, no explanations.`;
 
@@ -327,7 +352,7 @@ FEEDBACK:
 ${parsed.feedback}`;
 
     const revisionResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 3000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }]
