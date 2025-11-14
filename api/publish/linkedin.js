@@ -56,76 +56,108 @@ module.exports = async (req, res) => {
     
     // ACTUAL PUBLISHING (only runs if ENABLE_PUBLISHING=true)
     
-    // Get LinkedIn user info (to get URN)
-    // IMPORTANT: Use /v2/userinfo (OpenID Connect) instead of /v2/me (legacy)
-    // This works with the 'openid' and 'profile' scopes
-    const userInfoResponse = await axios.get('https://api.linkedin.com/v2/userinfo', {
-      headers: {
-        'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`
-      }
-    });
-    
-    // The 'sub' field contains the person ID
-    const authorUrn = `urn:li:person:${userInfoResponse.data.sub}`;
-    
-    // Post to LinkedIn using UGC Posts API
-    const postResponse = await axios.post(
-      'https://api.linkedin.com/v2/ugcPosts',
-      {
-        author: authorUrn,
-        lifecycleState: 'PUBLISHED',
-        specificContent: {
-          'com.linkedin.ugc.ShareContent': {
-            shareCommentary: {
-              text: content.content
-            },
-            shareMediaCategory: 'NONE'
+    try {
+      // Get LinkedIn user info (to get URN)
+      // IMPORTANT: Use /v2/userinfo (OpenID Connect) instead of /v2/me (legacy)
+      // This works with the 'openid' and 'profile' scopes
+      const userInfoResponse = await axios.get('https://api.linkedin.com/v2/userinfo', {
+        headers: {
+          'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`
+        }
+      });
+      
+      // The 'sub' field contains the person ID
+      const authorUrn = `urn:li:person:${userInfoResponse.data.sub}`;
+      
+      // Post to LinkedIn using UGC Posts API
+      const postResponse = await axios.post(
+        'https://api.linkedin.com/v2/ugcPosts',
+        {
+          author: authorUrn,
+          lifecycleState: 'PUBLISHED',
+          specificContent: {
+            'com.linkedin.ugc.ShareContent': {
+              shareCommentary: {
+                text: content.content
+              },
+              shareMediaCategory: 'NONE'
+            }
+          },
+          visibility: {
+            'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
           }
         },
-        visibility: {
-          'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0'
+          }
         }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-          'X-Restli-Protocol-Version': '2.0.0'
-        }
+      );
+      
+      // Update content_library status to posted
+      await supabase
+        .from('content_library')
+        .update({
+          status: 'posted',
+          posted_date: new Date().toISOString(),
+          queue_position: null
+        })
+        .eq('id', content.id);
+      
+      // Shift remaining queue positions up
+      await supabase.rpc('shift_queue_positions', {
+        content_type: 'linkedin',
+        from_position: 1
+      });
+      
+      console.log(`✅ Published LinkedIn post`);
+      
+      return res.status(200).json({ 
+        success: true, 
+        message: 'LinkedIn post published',
+        postId: postResponse.data.id 
+      });
+      
+    } catch (publishError) {
+      console.error('LinkedIn publishing error:', publishError);
+      
+      // Log more details for debugging
+      if (publishError.response) {
+        console.error('LinkedIn API error:', publishError.response.data);
       }
-    );
-    
-    // Update content_library status
-    await supabase
-      .from('content_library')
-      .update({
-        status: 'posted',
-        posted_date: new Date().toISOString(),
-        queue_position: null
-      })
-      .eq('id', content.id);
-    
-    // Shift remaining queue positions up
-    await supabase.rpc('shift_queue_positions', {
-      content_type: 'linkedin',
-      from_position: 1
-    });
-    
-    console.log(`✅ Published LinkedIn post`);
-    
-    return res.status(200).json({ 
-      success: true,
-      message: 'LinkedIn post published',
-      postId: postResponse.data.id 
-    });
+      
+      // Update content status to 'failed' and remove from queue
+      await supabase
+        .from('content_library')
+        .update({
+          status: 'failed',
+          queue_position: null
+        })
+        .eq('id', content.id);
+      
+      // Shift remaining queue positions up
+      await supabase.rpc('shift_queue_positions', {
+        content_type: 'linkedin',
+        from_position: 1
+      });
+      
+      // Send failure notification
+      const errorDetails = publishError.response 
+        ? JSON.stringify(publishError.response.data, null, 2)
+        : publishError.message;
+      
+      await sendEmail(
+        '⚠️ LinkedIn Publishing Failed',
+        `Failed to publish LinkedIn post\n\nContent preview:\n${content.content.substring(0, 200)}...\n\nError: ${errorDetails}\n\nContent marked as 'failed' and removed from queue. Queue positions shifted up.`
+      );
+      
+      throw publishError;
+    }
     
   } catch (error) {
     console.error('LinkedIn publishing error:', error);
-    
-    // Log more details for debugging
-    if (error.response) {
-      console.error('LinkedIn API error:', error.response.data);
-    }
     
     return res.status(500).json({ 
       error: 'Failed to publish LinkedIn post',

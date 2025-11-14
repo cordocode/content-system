@@ -84,6 +84,28 @@ module.exports = async (req, res) => {
     
     if (publishError) {
       console.error('Blog publish error:', publishError);
+      
+      // Update content status to 'failed' and remove from queue
+      await supabase
+        .from('content_library')
+        .update({
+          status: 'failed',
+          queue_position: null
+        })
+        .eq('id', content.id);
+      
+      // Shift remaining queue positions up
+      await supabase.rpc('shift_queue_positions', {
+        content_type: 'blog',
+        from_position: 1
+      });
+      
+      // Send failure notification
+      await sendEmail(
+        '⚠️ Blog Publishing Failed',
+        `Failed to publish blog: "${content.title}"\n\nError: ${publishError.message}\n\nContent marked as 'failed' and removed from queue. Queue positions shifted up.`
+      );
+      
       throw publishError;
     }
     
