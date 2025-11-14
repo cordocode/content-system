@@ -64,11 +64,9 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
-    
     const response = await gmail.users.messages.list({
       userId: 'me',
-      q: `from:ben@corradoco.com subject:CONTENT is:unread after:${tenMinutesAgo}`,
+      q: `from:ben@corradoco.com subject:CONTENT is:unread`,
       maxResults: 10
     });
 
@@ -140,6 +138,27 @@ async function processEmail(messageId, contentLabelId) {
       .single();
 
     if (existingThread) {
+      // Check if this specific message has already been processed
+      // by looking at the thread's updated_at timestamp
+      const messageDate = new Date(parseInt(message.data.internalDate));
+      const threadLastUpdate = new Date(existingThread.created_at);
+      
+      // If thread exists and message is older than thread update, skip (already processed)
+      if (messageDate <= threadLastUpdate) {
+        console.log(`⏭️ SKIPPING: Email already processed in thread ${threadId}`);
+        
+        // Still mark as read to clean up inbox
+        await gmail.users.messages.modify({
+          userId: 'me',
+          id: messageId,
+          requestBody: {
+            removeLabelIds: ['UNREAD'],
+            addLabelIds: [contentLabelId]
+          }
+        });
+        return;
+      }
+      
       // Handle approval/revision
       await handleApproval(existingThread, body, threadId);
     } else {
@@ -205,7 +224,7 @@ Return in this exact format:
 }`;
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
+    model: 'claude-sonnet-4-5-20250929',
     max_tokens: 5000,
     system: systemPrompt,
     messages: [{ role: 'user', content: input }]
@@ -272,10 +291,12 @@ Return in this exact format:
 
   // Send approval email
   await sendApprovalEmail(generated, blogData, linkedInData, threadId);
+  
+  console.log(`✅ NEW CONTENT GENERATED: ${blogData.length} blog(s), ${linkedInData.length} LinkedIn post(s) - Sent for approval`);
 }
 
 // ============================================================================
-// PROMPT 2: REVISION - USING CLAUDE 4.5 SONNET
+// PROMPT 2: APPROVAL PARSING & HANDLING
 // ============================================================================
 async function handleApproval(thread, emailBody, threadId) {
   // Parse approval response
@@ -283,15 +304,14 @@ async function handleApproval(thread, emailBody, threadId) {
 
 Determine the user's intent and return JSON:
 {
-  "action": "approve|revise|swap|skip",
-  "feedback": "specific changes if revise, otherwise null",
-  "contentReference": "B1, L1, L2, etc if mentioned, otherwise null"
+  "action": "approve|revise",
+  "feedback": "specific changes if revise, otherwise null"
 }
 
 CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backticks.`;
 
   const parseResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
+    model: 'claude-sonnet-4-5-20250929',
     max_tokens: 500,
     system: systemPrompt,
     messages: [{ role: 'user', content: emailBody }]
@@ -307,6 +327,8 @@ CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backt
 
   // Handle based on action
   if (parsed.action === 'approve') {
+    console.log('📋 APPROVAL DETECTED - Processing approval...');
+    
     await supabase
       .from('content_library')
       .update({ status: 'approved' })
@@ -314,16 +336,20 @@ CRITICAL: Return ONLY raw JSON, no markdown formatting, no code blocks, no backt
     
     const { data: content } = await supabase
       .from('content_library')
-      .select('type')
+      .select('type, title')
       .eq('id', thread.content_id)
       .single();
     
     const queue = require('../../lib/queue');
-    await queue.addToQueue(thread.content_id, content.type);
+    const position = await queue.addToQueue(thread.content_id, content.type);
     
-    console.log('✅ Content approved and queued');
+    console.log(`✅ CONTENT APPROVED: "${content.title || 'Untitled'}" added to ${content.type} queue at position ${position}`);
+    
+    // SEND CONFIRMATION EMAIL
+    await sendConfirmationEmail(threadId, 'approved');
     
   } else if (parsed.action === 'revise') {
+    console.log('✏️ REVISION REQUESTED - Processing feedback...');
     // Get original content
     const { data: originalContent } = await supabase
       .from('content_library')
@@ -352,7 +378,7 @@ FEEDBACK:
 ${parsed.feedback}`;
 
     const revisionResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5-20250929',  // FIXED MODEL NAME
+      model: 'claude-sonnet-4-5-20250929',
       max_tokens: 3000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }]
@@ -373,7 +399,7 @@ ${parsed.feedback}`;
     // Send revised version for approval
     await sendRevisionEmail(originalContent, revisedContent, threadId);
     
-    console.log('✅ Content revised and sent for approval');
+    console.log(`✅ REVISION COMPLETED: "${originalContent.title || 'Untitled'}" v${originalContent.version + 1} sent for approval`);
   }
 }
 
@@ -430,6 +456,31 @@ async function sendRevisionEmail(originalContent, revisedContent, threadId) {
   emailContent += revisedContent;
   emailContent += '\n\n═══════════════════════════════════════\n';
   emailContent += 'Reply "approved" to queue or provide more feedback.\n';
+
+  const encodedEmail = Buffer.from(emailContent)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: {
+      raw: encodedEmail,
+      threadId: threadId
+    }
+  });
+}
+
+async function sendConfirmationEmail(threadId, action) {
+  let emailContent = 'From: ben@corradoco.com\n';
+  emailContent += 'To: ben@corradoco.com\n';
+  emailContent += 'Subject: Re: [Content Assistant] Confirmation\n\n';
+  
+  if (action === 'approved') {
+    emailContent += '✅ Content approved and added to queue!\n\n';
+    emailContent += 'Your content has been queued for publishing.';
+  }
 
   const encodedEmail = Buffer.from(emailContent)
     .toString('base64')

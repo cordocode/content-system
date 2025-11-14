@@ -12,7 +12,7 @@
   "crons": [
     {
       "path": "/api/email/poll",
-      "schedule": "*/5 * * * *"
+      "schedule": "* * * * *"
     },
     {
       "path": "/api/sheets/sync-status",
