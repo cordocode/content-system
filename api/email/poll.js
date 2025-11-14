@@ -161,6 +161,12 @@ async function processEmail(messageId, contentLabelId) {
       
       // Handle approval/revision
       await handleApproval(existingThread, body, threadId);
+      
+      // Update thread timestamp so we know we processed this message
+      await supabase
+        .from('conversation_threads')
+        .update({ created_at: new Date().toISOString() })
+        .eq('id', existingThread.id);
     } else {
       // New content request
       await handleNewContent(body, threadId);
